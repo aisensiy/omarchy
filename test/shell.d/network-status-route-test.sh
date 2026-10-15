@@ -18,10 +18,11 @@ case "$*" in
   "-j -4 route get "*" oif "*) printf '%s\n' "${TEST_GATEWAY_ROUTE:-[]}" ;;
   "-j addr show "*) printf '%s\n' "$TEST_ADDRS" ;;
   "-j -d link show dev "*)
-    # TEST_KERNEL_TUNNELS lists devices the kernel reports as tun or wireguard.
+    # TEST_KERNEL_TUNNELS lists device:kind pairs the kernel reports.
     device=${!#}
-    if [[ " ${TEST_KERNEL_TUNNELS:-} " == *" $device "* ]]; then
-      printf '[{"ifname":"%s","linkinfo":{"info_kind":"tun"}}]\n' "$device"
+    kind=$(tr ' ' '\n' <<<"${TEST_KERNEL_TUNNELS:-}" | awk -F: -v d="$device" '$1 == d { print $2 }')
+    if [[ -n $kind ]]; then
+      printf '[{"ifname":"%s","linkinfo":{"info_kind":"%s"}}]\n' "$device" "$kind"
     else
       printf '[{"ifname":"%s"}]\n' "$device"
     fi
@@ -92,9 +93,11 @@ grep -Fxq $'ip\t192.168.2.50' <<<"$verbose" || fail "gateway source address, not
 grep -Fxq $'prefix\t24' <<<"$verbose" || fail "prefix follows selected source address" "$verbose"
 pass "gateway source and prefix match"
 
-export TEST_ROUTES='[{"dev":"eth0","gateway":"192.168.2.1","prefsrc":"192.168.2.50","metric":100}]'
+export TEST_ROUTES='[{"dev":"eth0","gateway":"192.168.2.1","prefsrc":"10.0.0.5","metric":100}]'
+export TEST_GATEWAY_ROUTE='[{"dev":"eth0","prefsrc":"192.168.2.50"}]'
 verbose=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status" --verbose)
-grep -Fxq $'prefix\t24' <<<"$verbose" || fail "prefsrc prefix matches source" "$verbose"
+grep -Fxq $'ip\t10.0.0.5' <<<"$verbose" || fail "the route's own prefsrc wins" "$verbose"
+grep -Fxq $'prefix\t8' <<<"$verbose" || fail "prefsrc prefix matches source" "$verbose"
 pass "prefsrc prefix matches source"
 
 export TEST_ROUTES='[]'
@@ -107,11 +110,22 @@ pass "probe fallback without main default"
 # Mihomo and wg-quick tunnels that NetworkManager does not manage are found by
 # the kernel's link kind, and an uplink it does not manage still counts.
 export TEST_ROUTES='[{"dev":"Mihomo","gateway":"198.18.0.2","metric":10},{"dev":"enp1s0","gateway":"10.0.11.1","metric":100}]'
-export TEST_KERNEL_TUNNELS="Mihomo"
+export TEST_KERNEL_TUNNELS="Mihomo:tun"
 status=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status")
 [[ $status == $'ethernet\tenp1s0\t\t' ]] || fail "unmanaged TUN is skipped for an unmanaged uplink" "$status"
 pass "unmanaged TUN is skipped for an unmanaged uplink"
+
+export TEST_ROUTES='[{"dev":"wgq0","gateway":"10.7.0.1","metric":10},{"dev":"enp1s0","gateway":"10.0.11.1","metric":100}]'
+export TEST_KERNEL_TUNNELS="wgq0:wireguard"
+status=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status")
+[[ $status == $'ethernet\tenp1s0\t\t' ]] || fail "unmanaged WireGuard is skipped" "$status"
+pass "unmanaged WireGuard is skipped"
 unset TEST_KERNEL_TUNNELS
+
+export TEST_ROUTES='[{"dev":"eth0","gateway":"192.168.1.1","metric":100,"flags":["linkdown"]},{"dev":"wlan0","gateway":"192.168.1.1","metric":600}]'
+verbose=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status" --verbose)
+grep -Fxq $'iface\twlan0' <<<"$verbose" || fail "linkdown route is skipped" "$verbose"
+pass "linkdown route is skipped"
 
 # A NetworkManager WireGuard VPN can hold the main default at a lower metric.
 export TEST_ROUTES='[{"dev":"wg0","gateway":"10.8.0.1","metric":50},{"dev":"wlan0","gateway":"192.168.1.1","metric":600}]'

@@ -40,7 +40,8 @@ display_route_json() {
     device=$(jq -r '.dev // ""' <<<"$route")
     [[ -z $device ]] && continue
 
-    if ! is_tunnel "$device" && ! jq -e '(.flags // []) | index("dead")' <<<"$route" >/dev/null; then
+    # A default kept on an unplugged port is linkdown, not dead.
+    if ! is_tunnel "$device" && ! jq -e '(.flags // []) | (index("dead") or index("linkdown"))' <<<"$route" >/dev/null; then
       printf '[%s]\n' "$route"
       return
     fi
