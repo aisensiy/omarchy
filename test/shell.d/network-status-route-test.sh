@@ -17,6 +17,15 @@ case "$*" in
   "-j route get 1.1.1.1") printf '%s\n' "$TEST_PROBE" ;;
   "-j -4 route get "*" oif "*) printf '%s\n' "${TEST_GATEWAY_ROUTE:-[]}" ;;
   "-j addr show "*) printf '%s\n' "$TEST_ADDRS" ;;
+  "-j -d link show dev "*)
+    # TEST_KERNEL_TUNNELS lists devices the kernel reports as tun or wireguard.
+    device=${!#}
+    if [[ " ${TEST_KERNEL_TUNNELS:-} " == *" $device "* ]]; then
+      printf '[{"ifname":"%s","linkinfo":{"info_kind":"tun"}}]\n' "$device"
+    else
+      printf '[{"ifname":"%s"}]\n' "$device"
+    fi
+    ;;
   *) printf 'unexpected ip invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
@@ -94,3 +103,30 @@ status=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status")
 [[ $status == $'ethernet\tMeta\t\t' ]] || fail "probe fallback without main default" "$status"
 grep -Fxq -- '-j route get 1.1.1.1' "$NETWORK_STATUS_IP_LOG" || fail "probe fallback was not called"
 pass "probe fallback without main default"
+
+# Mihomo and wg-quick tunnels that NetworkManager does not manage are found by
+# the kernel's link kind, and an uplink it does not manage still counts.
+export TEST_ROUTES='[{"dev":"Mihomo","gateway":"198.18.0.2","metric":10},{"dev":"enp1s0","gateway":"10.0.11.1","metric":100}]'
+export TEST_KERNEL_TUNNELS="Mihomo"
+status=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status")
+[[ $status == $'ethernet\tenp1s0\t\t' ]] || fail "unmanaged TUN is skipped for an unmanaged uplink" "$status"
+pass "unmanaged TUN is skipped for an unmanaged uplink"
+unset TEST_KERNEL_TUNNELS
+
+# A NetworkManager WireGuard VPN can hold the main default at a lower metric.
+export TEST_ROUTES='[{"dev":"wg0","gateway":"10.8.0.1","metric":50},{"dev":"wlan0","gateway":"192.168.1.1","metric":600}]'
+status=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status")
+# wlan0 has no wireless sysfs node here, so status names it as a wired link.
+[[ $status == $'ethernet\twlan0\t\t' ]] || fail "WireGuard main default is skipped" "$status"
+verbose=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status" --verbose)
+grep -Fxq $'iface\twlan0' <<<"$verbose" || fail "WireGuard main default is skipped in details" "$verbose"
+pass "WireGuard main default is skipped"
+
+# With no source from the gateway lookup, fall back to the link's own address.
+export TEST_ROUTES='[{"dev":"eth0","gateway":"192.168.3.1","metric":100}]'
+export TEST_ADDRS='[{"addr_info":[{"family":"inet","local":"192.168.3.40","prefixlen":24,"scope":"global"}]}]'
+export TEST_GATEWAY_ROUTE='[]'
+verbose=$(PATH="$tmp/bin:$PATH" "$ROOT/bin/omarchy-network-status" --verbose)
+grep -Fxq $'ip\t192.168.3.40' <<<"$verbose" || fail "address falls back to the link's global address" "$verbose"
+grep -Fxq $'prefix\t24' <<<"$verbose" || fail "fallback address keeps its prefix" "$verbose"
+pass "address falls back to the link's global address"
